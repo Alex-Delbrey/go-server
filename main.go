@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 
 	"sync/atomic"
 )
@@ -13,48 +13,45 @@ type apiConfig struct {
 }
 
 func main() {
-	var apiCfg apiConfig
+	const filepathRoot = "."
+	const port = "8080"
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+	}
 	serveMux := http.NewServeMux()
-	handler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 
-	serveMux.Handle("/app", apiCfg.middlewareMetricsInc(handler))
-	serveMux.Handle("/app/assets/", apiCfg.middlewareMetricsInc(handler))
-	serveMux.Handle("/app/assets/logo.png", apiCfg.middlewareMetricsInc(handler))
+	serveMux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))))
 
 	serveMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(http.StatusText(http.StatusOK)))
 	})
 
-	serveMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hits: " + strconv.Itoa(int(apiCfg.fileserverHits.Load()))))
-	})
+	serveMux.HandleFunc("/metrics", apiCfg.handlerMetrics)
+	serveMux.HandleFunc("/reset", apiCfg.handlerReset)
 
-	serveMux.HandleFunc("/reset", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hits: " + strconv.Itoa(int(apiCfg.fileserverHits.Load()))))
-	})
-
-	s := http.Server{
+	s := &http.Server{
 		Handler: serveMux,
-		Addr:    ":8080",
+		Addr:    ":" + port,
 	}
-	log.Fatal(http.ListenAndServe(s.Addr, s.Handler))
+	log.Fatal(s.ListenAndServe())
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	cfg.fileserverHits.Add(1)
-	return next
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
 
-func (cfg *apiConfig) middlewareMetricsReset(next http.Handler) http.Handler {
-	cfg.fileserverHits.CompareAndSwap(cfg.fileserverHits.Load(), 0)
-	return next
+func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf("Hits: %d", cfg.fileserverHits.Load())))
 }
 
-// func (cfg *apiConfig) getMetrics(w http.ResponseWriter, r *http.Request, h http.Handler) http.Handler {
-// 	w.WriteHeader(http.StatusOK)
-// 	w.Write([]byte("Hits: " + strconv.Itoa(int(cfg.fileserverHits.Load()))))
-// 	return h
-// }
+func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	cfg.fileserverHits.Store(0)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Hits reset to 0"))
+}
